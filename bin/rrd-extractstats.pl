@@ -21,13 +21,18 @@ use Thread::Queue qw( );
 
 use Time::HiRes qw(time);
 
-if ($#ARGV < 2) {
-	die("Usage: $0 <path to RRD file directory> <path to known links file> outfile [interval-hours]\n");
+if ($#ARGV < 1) {
+	die("Usage: $0 <path to RRD file directory> <path to known links file> [statsfile [interval-hours]\n");
 }
 
 my $rrdpath = $ARGV[0];
 my $knownlinksfile = $ARGV[1];
-my $statsfile = $ARGV[2];
+
+my $statsfile = undef;
+if ($ARGV[3]) {
+    $statsfile = $ARGV[2];
+}
+
 my $interval = 86400;
 
 if ($ARGV[3]) {
@@ -44,22 +49,25 @@ my @links = values %knownlinks;
 my $db_version = 1;
 my $as_list;
 my $db;
-try {
-	if (-r $statsfile) { 
-		copy($statsfile, "$statsfile.tmp");
-	}
-	$db = DBI->connect("dbi:SQLite:dbname=$statsfile.tmp", '', '');
 
-	# Get last check timestamps
-	my $sth = $db->prepare("SELECT asn, checked_at FROM stats") or die('field missing');
-	$sth->execute();
-	while(my($item, $data) = $sth->fetchrow_array()) {
-		$as_list->{$item} = $data;
-	}
+if ($statsfile) {
+	try {
+		if (-r $statsfile) {
+			copy($statsfile, "$statsfile.tmp");
+		}
+		$db = DBI->connect("dbi:SQLite:dbname=$statsfile.tmp", '', '');
 
-	$db_version = 2;
-} catch ($e) {
-	print("Previously generated database not found or checked_at field is missing, proceed with all RRD files. ($e)\n");
+		# Get last check timestamps
+		my $sth = $db->prepare("SELECT asn, checked_at FROM stats") or die('field missing');
+		$sth->execute();
+		while(my($item, $data) = $sth->fetchrow_array()) {
+			$as_list->{$item} = $data;
+		}
+
+		$db_version = 2;
+	} catch ($e) {
+		print("Previously generated database not found or checked_at field is missing, proceed with all RRD files. ($e)\n");
+	}
 }
 
 # walk through all RRD files in the given path and extract stats for all links
@@ -134,36 +142,38 @@ printf("100%% (processed %d RRD files, skipped %d because those files didn't cha
 $rq->end();
 
 
-$db->do('PRAGMA synchronous = OFF');
-my $query;
-# Recreate the table if we didn't have the checked_at column above
-if ($db_version < 2) {
-	$db->do('DROP TABLE IF EXISTS stats;');
+if($statsfile) {
+	$db->do('PRAGMA synchronous = OFF');
+	my $query;
+	# Recreate the table if we didn't have the checked_at column above
+	if ($db_version < 2) {
+		$db->do('DROP TABLE IF EXISTS stats;');
 	
-	$query = 'CREATE TABLE stats("asn" INT PRIMARY KEY, "checked_at" INT';
-	foreach my $link (@links) {
-		$query .= ", \"${link}_in\" INT, \"${link}_out\" INT, \"${link}_v6_in\" INT, \"${link}_v6_out\" INT";
+		$query = 'CREATE TABLE stats("asn" INT PRIMARY KEY, "checked_at" INT';
+		foreach my $link (@links) {
+			$query .= ", \"${link}_in\" INT, \"${link}_out\" INT, \"${link}_v6_in\" INT, \"${link}_v6_out\" INT";
+		}
+		$query .= ');';
+		$db->do($query);
 	}
-	$query .= ');';
-	$db->do($query);
-}
 
-# read resultqueue and print data
-while (my $result = $rq->dequeue) {
-	$query = "INSERT OR REPLACE INTO stats VALUES ($result->{as}, $result->{checked_at}";
+	# read resultqueue and print data
+	while (my $result = $rq->dequeue) {
+		$query = "INSERT OR REPLACE INTO stats VALUES ($result->{as}, $result->{checked_at}";
 
-	foreach my $link (@links) {
-		$query .= ", '" . undefaszero($result->{result}->{"${link}_in"}) . "'";
-		$query .= ", '" . undefaszero($result->{result}->{"${link}_out"}) . "'";
-		$query .= ", '" . undefaszero($result->{result}->{"${link}_v6_in"}) . "'";
-		$query .= ", '" . undefaszero($result->{result}->{"${link}_v6_out"}) . "'";
+		foreach my $link (@links) {
+			$query .= ", '" . undefaszero($result->{result}->{"${link}_in"}) . "'";
+			$query .= ", '" . undefaszero($result->{result}->{"${link}_out"}) . "'";
+			$query .= ", '" . undefaszero($result->{result}->{"${link}_v6_in"}) . "'";
+			$query .= ", '" . undefaszero($result->{result}->{"${link}_v6_out"}) . "'";
+		}
+		$query .= ');';
+		$db->do($query);
 	}
-	$query .= ');';
-	$db->do($query);
-}
 
-$db->disconnect();
-rename("$statsfile.tmp", $statsfile);
+	$db->disconnect();
+	rename("$statsfile.tmp", $statsfile);
+}
 
 sub undefaszero {
 	my $val = shift;
